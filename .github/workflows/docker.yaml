@@ -15,6 +15,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v2
 
+      -
+        name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v3
+        with:
+          images: ghcr.io/arsfeld/ztcf
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v1
 
