@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
+use tokio::time::{sleep, Duration};
 
 use cloudflare::endpoints::{account, dns, workers, zone};
 use cloudflare::framework::{
@@ -20,26 +21,28 @@ use cloudflare::framework::{
 };
 
 #[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 struct NetworkMemberConfig {
-    ipAssignments: Vec<String>,
+    ip_assignments: Vec<Ipv4Addr>,
 }
 
 #[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 struct NetworkMember {
     id: String,
     clock: usize,
-    networkId: String,
-    nodeId: String,
-    controllerId: String,
+    network_id: String,
+    node_id: String,
+    controller_id: String,
     config: NetworkMemberConfig,
     hidden: bool,
     name: String,
     description: String,
-    lastOnline: usize,
-    physicalAddress: String,
-    clientVersion: String,
-    protocolVersion: u32,
-    supportsRulesEngine: bool,
+    last_online: usize,
+    physical_address: String,
+    client_version: String,
+    protocol_version: u32,
+    supports_rules_engine: bool,
 }
 
 async fn get_zt_ips() -> Result<HashMap<String, Ipv4Addr>, Error> {
@@ -62,11 +65,16 @@ async fn get_zt_ips() -> Result<HashMap<String, Ipv4Addr>, Error> {
     let members: Vec<NetworkMember> = response.json().await?;
     let ips: HashMap<String, Ipv4Addr> = members
         .into_iter()
-        .map(|x| (x.name, x.config.ipAssignments[0].parse::<Ipv4Addr>().unwrap()))
+        .map(|x| {
+            (
+                x.name,
+                x.config.ip_assignments[0],
+            )
+        })
         .collect();
     println!("{:?}", ips);
 
-    return Ok(ips);
+    Ok(ips)
 }
 
 #[async_trait]
@@ -121,32 +129,33 @@ impl CloudflareDNS {
 
         let records: HashMap<String, Ipv4Addr> = existing_records
             .into_iter()
+            .filter(|x| matches!(x.content, dns::DnsContent::A {..}))
+            .filter(|x| !x.name.eq(&zone_name))
             .map(|x| {
                 (
-                    match x.name.strip_suffix(&format!(".{}", zone_name)) {
-                        Some(name) => name.to_string(),
-                        None => x.name.to_string(),
-                    },
+                    String::from(x.name.strip_suffix(&format!(".{}", zone_name)).unwrap()),
                     match x.content {
                         dns::DnsContent::A { content } => content,
                         _ => Ipv4Addr::new(0, 0, 0, 0),
                     },
                 )
             })
+            //.filter(|(name, _)| name.is_some())
+            //.map(|(name, ip)| (String::from(name.unwrap()), ip))
+            //.filter(|(name, _)| !name.ends_with(zone_name.as_str()))
             .collect();
 
-        return Ok(records);
+        Ok(records)
     }
 
     async fn add_record(&self, name: String, ip: Ipv4Addr) -> Result<(), Error> {
-        let response = self.client
+        let response = self
+            .client
             .request(&dns::CreateDnsRecord {
                 zone_identifier: &self.zone_id,
                 params: dns::CreateDnsRecordParams {
                     name: &name,
-                    content: dns::DnsContent::A {
-                        content: ip,
-                    },
+                    content: dns::DnsContent::A { content: ip },
                     priority: None,
                     proxied: None,
                     ttl: None,
@@ -154,29 +163,33 @@ impl CloudflareDNS {
             })
             .await;
         println!("{:?}", response);
-        return Ok(());
+        Ok(())
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() {
     dotenv().ok();
 
-    let members = get_zt_ips().await?;
+    loop {
+        let members = get_zt_ips().await;
 
-    println!("Members: {:?}", members);
+        println!("Members: {:?}", members);
 
-    let zone_identifier = env::var("CF_ZONE_ID").unwrap();
+        let zone_identifier = env::var("CF_ZONE_ID").unwrap();
 
-    let dns = CloudflareDNS::new(zone_identifier);
+        let dns = CloudflareDNS::new(zone_identifier);
 
-    let records = dns.get_records().await?;
+        let records = dns.get_records().await;
 
-    println!("Records: {:?}", records);
+        println!("Records: {:?}", records);
 
-    for (name, ip) in members {
-        let response = dns.add_record(name, ip).await;
+        for (name, ip) in members {
+            let response = dns.add_record(name, ip).await;
+        }
+
+        println!("Going to sleep now");
+
+        sleep(Duration::from_millis(5000)).await;
     }
-
-    Ok(())
 }
