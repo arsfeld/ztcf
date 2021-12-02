@@ -148,14 +148,14 @@ impl CloudflareDNS {
         Ok(records)
     }
 
-    async fn add_record(&self, name: String, ip: Ipv4Addr) -> Result<(), Error> {
+    async fn add_record(&self, name: &String, ip: &Ipv4Addr) -> Result<(), Error> {
         let response = self
             .client
             .request(&dns::CreateDnsRecord {
                 zone_identifier: &self.zone_id,
                 params: dns::CreateDnsRecordParams {
                     name: &name,
-                    content: dns::DnsContent::A { content: ip },
+                    content: dns::DnsContent::A { content: *ip },
                     priority: None,
                     proxied: None,
                     ttl: None,
@@ -172,7 +172,7 @@ async fn main() {
     dotenv().ok();
 
     loop {
-        let members = get_zt_ips().await;
+        let members = get_zt_ips().await.unwrap();
 
         println!("Members: {:?}", members);
 
@@ -184,8 +184,8 @@ async fn main() {
 
         println!("Records: {:?}", records);
 
-        for (name, ip) in members {
-            let response = dns.add_record(name, ip).await;
+        for (name, ip) in &members {
+            dns.add_record(&name, &ip).await.unwrap();
         }
 
         println!("Going to sleep now");
