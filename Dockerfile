@@ -1,28 +1,11 @@
-# Workaround for QEmu bug when building for 32bit platforms on a 64bit host
-FROM --platform=$BUILDPLATFORM rust:latest as vendor
-WORKDIR /app
-
-COPY ./Cargo.toml Cargo.toml
-
-RUN mkdir .cargo && cargo vendor > .cargo/config.toml
-
 FROM rust:latest as builder
-WORKDIR /app
+
+RUN cargo install cargo-build-deps
 
 COPY ./Cargo.toml .
+COPY ./Cargo.lock .
 
-COPY --from=vendor /app/.cargo .cargo
-COPY --from=vendor /app/vendor vendor
-
-# Without the workaround
-# FROM rust:latest as builder
-
-# RUN cargo install cargo-build-deps
-
-# COPY ./Cargo.toml .
-# COPY ./Cargo.lock .
-
-# RUN cargo build-deps --release
+RUN cargo build-deps --release
 
 COPY ./src src
 RUN  cargo build --release
