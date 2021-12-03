@@ -3,7 +3,6 @@ FROM rust:latest as builder
 RUN cargo install cargo-build-deps
 
 COPY ./Cargo.toml .
-COPY ./Cargo.lock .
 
 RUN cargo build-deps --release
 
