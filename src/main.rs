@@ -6,19 +6,45 @@ use reqwest::Error;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::str::FromStr;
+use std::net::Ipv4Addr;
 use tokio::time::{sleep, Duration};
 
-use cloudflare::endpoints::{account, dns, workers, zone};
+use cloudflare::endpoints::{dns, zone};
 use cloudflare::framework::{
     async_api::ApiClient,
     async_api::Client,
     auth::Credentials,
-    mock::{MockApiClient, NoopEndpoint},
     response::{ApiFailure, ApiResponse, ApiResult},
-    Environment, HttpApiClient, HttpApiClientConfig, OrderDirection,
+    Environment, HttpApiClientConfig, OrderDirection,
 };
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct IpAssignmentPool {
+    ip_range_start: Ipv4Addr,
+    ip_range_end: Ipv4Addr,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct Route {
+    target: String,
+    via: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct NetworkConfig {
+    ip_assignment_pools: Vec<IpAssignmentPool>,
+    routes: Vec<Route>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct Network {
+    id: String,
+    config: NetworkConfig,
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +71,29 @@ struct NetworkMember {
     supports_rules_engine: bool,
 }
 
+async fn get_zt_network() -> Result<Network, Error> {
+    let client = reqwest::Client::new();
+
+    let request_url = format!(
+        "https://my.zerotier.com/api/network/{network_id}",
+        network_id = env::var("ZT_NETWORK_ID").unwrap()
+    );
+    println!("{}", request_url);
+    let response = client
+        .get(&request_url)
+        .header(
+            "Authorization",
+            format!("Bearer {}", env::var("ZT_API_TOKEN").unwrap()),
+        )
+        .send()
+        .await?;
+
+    let network: Network = response.json().await?;
+    println!("{:?}", network);
+
+    Ok(network)
+}
+
 async fn get_zt_ips() -> Result<HashMap<String, Ipv4Addr>, Error> {
     let client = reqwest::Client::new();
 
@@ -65,14 +114,9 @@ async fn get_zt_ips() -> Result<HashMap<String, Ipv4Addr>, Error> {
     let members: Vec<NetworkMember> = response.json().await?;
     let ips: HashMap<String, Ipv4Addr> = members
         .into_iter()
-        .map(|x| {
-            (
-                x.name,
-                x.config.ip_assignments[0],
-            )
-        })
+        .map(|x| (x.name, x.config.ip_assignments[0]))
         .collect();
-    println!("{:?}", ips);
+    //println!("{:?}", ips);
 
     Ok(ips)
 }
@@ -85,6 +129,27 @@ trait DNS {
 struct CloudflareDNS {
     client: Client,
     zone_id: String,
+}
+
+fn print_response<T: ApiResult>(response: ApiResponse<T>) {
+    match response {
+        Ok(success) => println!("Success: {:#?}", success),
+        Err(e) => match e {
+            ApiFailure::Error(status, errors) => {
+                println!("HTTP {}:", status);
+                for err in errors.errors {
+                    println!("Error {}: {}", err.code, err.message);
+                    for (k, v) in err.other {
+                        println!("{}: {}", k, v);
+                    }
+                }
+                for (k, v) in errors.other {
+                    println!("{}: {}", k, v);
+                }
+            }
+            ApiFailure::Invalid(reqwest_err) => println!("Error: {}", reqwest_err),
+        },
+    }
 }
 
 impl CloudflareDNS {
@@ -102,7 +167,7 @@ impl CloudflareDNS {
         }
     }
 
-    async fn get_records(&self) -> Result<HashMap<String, Ipv4Addr>, Error> {
+    async fn get_records(&self) -> Result<HashMap<String, dns::DnsRecord>, Error> {
         let zone_details = self
             .client
             .request(&zone::ZoneDetails {
@@ -127,17 +192,17 @@ impl CloudflareDNS {
             .unwrap()
             .result;
 
-        let records: HashMap<String, Ipv4Addr> = existing_records
+        let records: HashMap<String, dns::DnsRecord> = existing_records
             .into_iter()
-            .filter(|x| matches!(x.content, dns::DnsContent::A {..}))
-            .filter(|x| !x.name.eq(&zone_name))
+            .filter(|x| matches!(x.content, dns::DnsContent::A { .. }) && !x.name.eq(&zone_name))
             .map(|x| {
                 (
                     String::from(x.name.strip_suffix(&format!(".{}", zone_name)).unwrap()),
-                    match x.content {
-                        dns::DnsContent::A { content } => content,
-                        _ => Ipv4Addr::new(0, 0, 0, 0),
-                    },
+                    // match x.content {
+                    //     dns::DnsContent::A { content } => content,
+                    //     _ => Ipv4Addr::new(0, 0, 0, 0),
+                    // },
+                    x,
                 )
             })
             //.filter(|(name, _)| name.is_some())
@@ -162,7 +227,42 @@ impl CloudflareDNS {
                 },
             })
             .await;
-        println!("{:?}", response);
+        print_response(response);
+        Ok(())
+    }
+
+    async fn update_record(
+        &self,
+        record: &dns::DnsRecord,
+        name: &String,
+        ip: &Ipv4Addr,
+    ) -> Result<(), Error> {
+        let response = self
+            .client
+            .request(&dns::UpdateDnsRecord {
+                zone_identifier: &self.zone_id,
+                identifier: &record.id,
+                params: dns::UpdateDnsRecordParams {
+                    name: name,
+                    content: dns::DnsContent::A { content: *ip },
+                    proxied: None,
+                    ttl: None,
+                },
+            })
+            .await;
+        print_response(response);
+        Ok(())
+    }
+
+    async fn delete_record(&self, record: &dns::DnsRecord) -> Result<(), Error> {
+        let response = self
+            .client
+            .request(&dns::DeleteDnsRecord {
+                zone_identifier: &self.zone_id,
+                identifier: &record.id,
+            })
+            .await;
+        print_response(response);
         Ok(())
     }
 }
@@ -172,24 +272,48 @@ async fn main() {
     dotenv().ok();
 
     loop {
+        let network = get_zt_network().await.unwrap();
         let members = get_zt_ips().await.unwrap();
-
-        println!("Members: {:?}", members);
-
+        
         let zone_identifier = env::var("CF_ZONE_ID").unwrap();
-
         let dns = CloudflareDNS::new(zone_identifier);
-
-        let records = dns.get_records().await;
-
-        println!("Records: {:?}", records);
+        let records = dns.get_records().await.unwrap();
 
         for (name, ip) in &members {
-            dns.add_record(&name, &ip).await.unwrap();
+            if let dns::DnsContent::A { content } = records[name].content {
+                if *ip != content {
+                    println!(
+                        "Updating {:?} with {:?} (existing is {:?}))",
+                        name, ip, records[name]
+                    );
+                    dns.update_record(&records[name], &name, &ip).await.unwrap();
+                }
+            } else {
+                println!("Adding record {:?} with {:?}", name, ip);
+                dns.add_record(&name, &ip).await.unwrap();
+            }
+        }
+
+        for (name, record) in records.iter() {
+            if members.contains_key(name) {
+                continue;
+            }
+            if let dns::DnsContent::A { content } = record.content {
+                let mut in_pool = false;
+                for pool in network.config.ip_assignment_pools.iter() {
+                    in_pool =
+                        in_pool || content >= pool.ip_range_start && content <= pool.ip_range_end;
+                }
+                if !in_pool {
+                    continue;
+                }
+            }
+            println!("Deleting record {:?}", record);
+            dns.delete_record(record).await.unwrap();
         }
 
         println!("Going to sleep now");
 
-        sleep(Duration::from_millis(5000)).await;
+        sleep(Duration::from_millis(60000)).await;
     }
 }
