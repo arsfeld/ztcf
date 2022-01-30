@@ -280,6 +280,12 @@ async fn main() {
         let records = dns.get_records().await.unwrap();
 
         for (name, ip) in &members {
+            if !records.contains_key(name) {
+                println!("Adding record {:?} with {:?}", name, ip);
+                dns.add_record(&name, &ip).await.unwrap();
+                continue;
+            }
+
             if let dns::DnsContent::A { content } = records[name].content {
                 if *ip != content {
                     println!(
@@ -288,9 +294,6 @@ async fn main() {
                     );
                     dns.update_record(&records[name], &name, &ip).await.unwrap();
                 }
-            } else {
-                println!("Adding record {:?} with {:?}", name, ip);
-                dns.add_record(&name, &ip).await.unwrap();
             }
         }
 
