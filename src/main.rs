@@ -274,7 +274,7 @@ async fn main() {
     loop {
         let network = get_zt_network().await.unwrap();
         let members = get_zt_ips().await.unwrap();
-        
+
         let zone_identifier = env::var("CF_ZONE_ID").unwrap();
         let dns = CloudflareDNS::new(zone_identifier);
         let records = dns.get_records().await.unwrap();
